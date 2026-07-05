@@ -1,0 +1,12 @@
+capital: 100000
+fees: 20
+slippage: 0.001
+tax_rates:
+  equity_stcg: 0.20
+  equity_ltcg: 0.125
+  debt_stcg: 0.30
+  debt_ltcg: 0.125
+tickers:
+  nifty: "NIFTYBEES.NS"
+  gold: "GOLDBEES.NS"
+  liquid: "LIQUIDBEES.NS"

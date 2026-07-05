@@ -1,0 +1,9 @@
+streamlit
+vectorbt
+yfinance
+pandas_ta
+numpy
+plotly
+numba
+PyYAML
+jupyter
