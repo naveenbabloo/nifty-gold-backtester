@@ -18,11 +18,9 @@ def run_daily_logic():
     end_date = datetime.now()
     start_date = end_date - timedelta(days=250)
     
-    print(f"Fetching latest data for {tickers}...")
-    df = yf.download(tickers, start=start_date, end=end_date)
+    df = yf.download(tickers, start=start_date, end=end_date, progress=False)
     if df.empty:
-        print("Failed to download data.")
-        return
+        return {"error": "Failed to download data."}
         
     dfs = {}
     for name, ticker in zip(names, tickers):
@@ -32,8 +30,7 @@ def run_daily_logic():
                 ticker_df.index = ticker_df.index.tz_convert(None)
             dfs[name] = ticker_df
         except Exception as e:
-            print(f"Error extracting {ticker}: {e}")
-            return
+            return {"error": f"Error extracting {ticker}: {e}"}
             
     trading_dates = dfs['nifty'].index
     for name in names:
@@ -70,52 +67,87 @@ def run_daily_logic():
     max_roc_asset = latest_roc126.idxmax()
     active_asset = {n: (n == max_roc_asset) for n in names}
     
-    print("\n--- Current Market State ---")
-    print(f"Date: {trading_dates[-1].date()}")
-    print(f"Active Asset (Macro Regime): {max_roc_asset.upper()}")
-    print("Latest 6m ROC:")
-    print(latest_roc126)
-    
-    print("\n--- Swing Execution Logic ---")
     latest_close = close.iloc[-1]
     latest_high = high.iloc[-1]
     latest_low = low.iloc[-1]
     latest_ema20 = ema20.iloc[-1]
+    latest_sma50 = sma50.iloc[-1]
     latest_rsi14 = rsi14.iloc[-1]
     
+    results = {
+        "date": trading_dates[-1].date().isoformat(),
+        "active_asset": max_roc_asset,
+        "roc": latest_roc126.to_dict(),
+        "signals": {},
+        "chart_data": {}
+    }
+    
     for asset in ["nifty", "gold"]:
-        if active_asset[asset]:
-            print(f"{asset.upper()} is active.")
-            is_pullback = (latest_low[asset] <= latest_ema20[asset]) and (latest_high[asset] >= latest_ema20[asset])
-            is_proximity = (latest_close[asset] <= latest_ema20[asset] * 1.015) and (latest_close[asset] >= latest_ema20[asset] * 0.985)
-            is_rsi_ok = (latest_rsi14[asset] > 40) and (latest_rsi14[asset] < 70)
-            
-            print(f"  Pullback/Proximity to EMA20 ({latest_ema20[asset]:.2f}): {is_pullback or is_proximity}")
-            print(f"  RSI(14) between 40-70 ({latest_rsi14[asset]:.2f}): {is_rsi_ok}")
-            
-            if (is_pullback or is_proximity) and is_rsi_ok:
-                print(f"  >> BUY SIGNAL for {asset.upper()}")
-            else:
-                print(f"  >> NO ENTRY SIGNAL for {asset.upper()} today.")
-                
-    if active_asset["liquid"]:
-        print("LIQUID is active. >> HOLD CASH (Liquid BeES)")
+        is_active = active_asset[asset]
+        is_pullback = (latest_low[asset] <= latest_ema20[asset]) and (latest_high[asset] >= latest_ema20[asset])
+        is_proximity = (latest_close[asset] <= latest_ema20[asset] * 1.015) and (latest_close[asset] >= latest_ema20[asset] * 0.985)
+        is_rsi_ok = (latest_rsi14[asset] > 40) and (latest_rsi14[asset] < 70)
         
-    print("\n--- Exit Triggers Check ---")
-    for asset in ["nifty", "gold"]:
         cross_below = (macd_line[asset].iloc[-1] < macd_signal[asset].iloc[-1]) and (macd_line[asset].iloc[-2] >= macd_signal[asset].iloc[-2])
-        close_below_sma = latest_close[asset] < sma50[asset].iloc[-1]
-        not_active = not active_asset[asset]
+        close_below_sma = latest_close[asset] < latest_sma50[asset]
         
-        print(f"{asset.upper()}:")
-        print(f"  MACD Bearish Cross: {cross_below}")
-        print(f"  Close below 50 SMA: {close_below_sma}")
-        print(f"  Regime Shift (Not Active): {not_active}")
+        action = "HOLD"
+        reason = "No entry/exit conditions met."
+        color = "blue"
         
-        if cross_below or close_below_sma or not_active:
-            print(f"  >> SELL SIGNAL for {asset.upper()} (If currently held)")
-        else:
-            print(f"  >> NO SELL SIGNAL for {asset.upper()} (Hold if in position)")
+        if not is_active:
+            action = "SELL"
+            reason = "Regime shift. Not the active asset."
+            color = "red"
+        elif cross_below or close_below_sma:
+            action = "SELL"
+            reason = f"Exit triggered: {'MACD Bearish Cross' if cross_below else 'Close below 50 SMA'}."
+            color = "red"
+        elif is_active and (is_pullback or is_proximity) and is_rsi_ok:
+            action = "BUY"
+            reason = "Active Asset + Pullback to EMA20 + RSI(14) between 40-70."
+            color = "green"
+        elif is_active:
+            action = "HOLD"
+            reason = "Active Asset. Waiting for pullback to 20 EMA."
+            color = "yellow"
+            
+        results["signals"][asset] = {
+            "action": action,
+            "reason": reason,
+            "color": color,
+            "metrics": {
+                "close": float(latest_close[asset]),
+                "ema20": float(latest_ema20[asset]),
+                "sma50": float(latest_sma50[asset]),
+                "rsi14": float(latest_rsi14[asset]),
+                "roc126": float(latest_roc126[asset])
+            }
+        }
+        
+        # Save last 60 days for charting
+        chart_df = dfs[asset].tail(60).copy()
+        chart_df['EMA20'] = ema20[asset].tail(60)
+        chart_df['SMA50'] = sma50[asset].tail(60)
+        
+        # Convert to records for JSON serialization (Streamlit session state compatibility)
+        chart_df.index = chart_df.index.strftime('%Y-%m-%d')
+        chart_df_reset = chart_df.reset_index().rename(columns={'index': 'Date'})
+        results["chart_data"][asset] = chart_df_reset.to_dict(orient="records")
+        
+    # Liquid
+    results["signals"]["liquid"] = {
+        "action": "BUY" if active_asset["liquid"] else "HOLD",
+        "reason": "Market in cash regime." if active_asset["liquid"] else "Not in cash regime.",
+        "color": "blue" if active_asset["liquid"] else "gray",
+        "metrics": {
+            "close": float(latest_close["liquid"]),
+            "roc126": float(latest_roc126["liquid"])
+        }
+    }
+    
+    return results
 
 if __name__ == "__main__":
-    run_daily_logic()
+    import json
+    print(json.dumps(run_daily_logic(), indent=2))
