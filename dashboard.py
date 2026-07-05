@@ -4,7 +4,7 @@ import yaml
 import plotly.graph_objects as go
 from generate_signals import run_daily_logic
 
-st.set_page_config(page_title="Nifty/Gold Dual Momentum", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Nifty/Gold Macro Regime", layout="wide", initial_sidebar_state="expanded")
 
 # Apply modern dark theme CSS
 st.markdown("""
@@ -79,12 +79,12 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Config error: {e}")
 
-st.markdown('<p class="main-header">Nifty/Gold Dual Momentum Engine</p>', unsafe_allow_html=True)
-st.markdown("Automated quantitative regime-switching system. Generates actionable signals based on 6M Relative Strength and EMA pullbacks.")
+st.markdown('<p class="main-header">Nifty/Gold Macro Regime Engine</p>', unsafe_allow_html=True)
+st.markdown("Automated quantitative regime-switching system. Generates actionable signals based on the Nifty/Gold price ratio 50-day and 200-day SMA crossover.")
 st.markdown("---")
 
 if st.button("🚀 Analyze Today's Market", use_container_width=True):
-    with st.spinner("Fetching latest market data & calculating indicators..."):
+    with st.spinner("Fetching latest market data & calculating ratio..."):
         results = run_daily_logic()
         
     if "error" in results:
@@ -96,9 +96,9 @@ if st.button("🚀 Analyze Today's Market", use_container_width=True):
     
     # 1. Top Action Cards
     st.markdown("### Executive Action Plan")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
-    mapping = {"nifty": col1, "gold": col2, "liquid": col3}
+    mapping = {"nifty": col1, "gold": col2}
     for asset, data in results["signals"].items():
         color_class = data["color"]
         action = data["action"]
@@ -114,49 +114,52 @@ if st.button("🚀 Analyze Today's Market", use_container_width=True):
             
     st.markdown("---")
     
-    # 2. Market Regime & Momentum
-    st.markdown("### Macro Regime (6-Month Momentum)")
+    # 2. Market Regime & Ratio Metrics
+    st.markdown("### Macro Regime (Nifty/Gold Ratio)")
     m_col1, m_col2, m_col3 = st.columns(3)
     
-    m_col1.metric("NIFTY 6M ROC", f"{results['roc']['nifty']:.2f}%", 
-                  f"{results['roc']['nifty'] - results['roc']['gold']:.2f}% vs Gold")
-    m_col2.metric("GOLD 6M ROC", f"{results['roc']['gold']:.2f}%",
-                  f"{results['roc']['gold'] - results['roc']['nifty']:.2f}% vs Nifty")
-    m_col3.metric("LIQUID 6M ROC", f"{results['roc']['liquid']:.2f}%")
+    ratio_data = results['ratio_metrics']
+    m_col1.metric("Current Ratio", f"{ratio_data['current_ratio']:.3f}")
+    
+    sma50 = ratio_data.get('sma50')
+    sma200 = ratio_data.get('sma200')
+    
+    m_col2.metric("50-Day SMA", f"{sma50:.3f}" if sma50 is not None else "N/A")
+    m_col3.metric("200-Day SMA", f"{sma200:.3f}" if sma200 is not None else "N/A")
     
     active_asset = results['active_asset']
-    st.info(f"💡 **Current Regime:** Capital should be allocated to **{active_asset.upper()}** because it has the highest 6-month momentum.")
+    st.info(f"💡 **Current Regime:** Capital should be allocated to **{active_asset.upper()}** because its secular trend is outperforming.")
 
     st.markdown("---")
 
     # 3. Interactive Chart
-    if active_asset in results["chart_data"]:
-        st.markdown(f"### Tactical Entry Setup: {active_asset.upper()}")
+    if "ratio" in results["chart_data"]:
+        st.markdown(f"### Long-Term Ratio Chart: Nifty/Gold")
         
-        df = pd.DataFrame(results["chart_data"][active_asset])
+        df = pd.DataFrame(results["chart_data"]["ratio"])
         df['Date'] = pd.to_datetime(df['Date'])
         
         fig = go.Figure()
         
-        # Candlesticks
-        fig.add_trace(go.Candlestick(
-            x=df['Date'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-            name="Price",
-            increasing_line_color='#00ff88', decreasing_line_color='#ff0066'
-        ))
-        
-        # EMA20
+        # Ratio Line
         fig.add_trace(go.Scatter(
-            x=df['Date'], y=df['EMA20'], 
-            line=dict(color='#00d4ff', width=2),
-            name="20 EMA (Pullback Target)"
+            x=df['Date'], y=df['Ratio'], 
+            line=dict(color='#00ff88', width=2),
+            name="Nifty/Gold Ratio"
         ))
         
         # SMA50
         fig.add_trace(go.Scatter(
             x=df['Date'], y=df['SMA50'], 
-            line=dict(color='#ff9900', width=2, dash='dot'),
-            name="50 SMA (Trend Support)"
+            line=dict(color='#00d4ff', width=2),
+            name="50-Day SMA"
+        ))
+        
+        # SMA200
+        fig.add_trace(go.Scatter(
+            x=df['Date'], y=df['SMA200'], 
+            line=dict(color='#ff9900', width=3, dash='dash'),
+            name="200-Day SMA"
         ))
         
         fig.update_layout(
@@ -170,11 +173,3 @@ if st.button("🚀 Analyze Today's Market", use_container_width=True):
         )
         
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Tactical Metrics
-        metrics = results["signals"][active_asset]["metrics"]
-        t_col1, t_col2, t_col3, t_col4 = st.columns(4)
-        t_col1.metric("Current Price", f"₹{metrics['close']:.2f}")
-        t_col2.metric("20 EMA", f"₹{metrics['ema20']:.2f}")
-        t_col3.metric("Distance to 20 EMA", f"{(metrics['close']/metrics['ema20'] - 1)*100:.2f}%")
-        t_col4.metric("RSI (14)", f"{metrics['rsi14']:.2f}")

@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 import yaml
 from datetime import datetime, timedelta
@@ -14,137 +13,83 @@ def run_daily_logic():
     tickers = list(config["tickers"].values())
     names = list(config["tickers"].keys())
     
-    # Fetch 250 days to ensure enough data for ROC(126)
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=250)
+    # We only care about Nifty and Gold for Strategy 1
+    # LiquidBeES is ignored
+    core_tickers = ["NIFTYBEES.NS", "GOLDBEES.NS"]
     
-    df = yf.download(tickers, start=start_date, end=end_date, progress=False)
+    # Fetch 300 days to ensure enough data for 200 SMA
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    
+    df = yf.download(core_tickers, start=start_date, end=end_date, auto_adjust=True, progress=False)
+    if 'Close' in df.columns:
+        df = df['Close']
+    else:
+        df = df.xs('Close', axis=1, level=0)
+        
+    df = df.ffill().dropna()
+    
     if df.empty:
         return {"error": "Failed to download data."}
         
-    dfs = {}
-    for name, ticker in zip(names, tickers):
-        try:
-            ticker_df = df.xs(ticker, axis=1, level=1, drop_level=True)
-            if ticker_df.index.tz is not None:
-                ticker_df.index = ticker_df.index.tz_convert(None)
-            dfs[name] = ticker_df
-        except Exception as e:
-            return {"error": f"Error extracting {ticker}: {e}"}
-            
-    trading_dates = dfs['nifty'].index
-    for name in names:
-        dfs[name] = dfs[name].reindex(trading_dates).ffill()
-        
-    # Liquid BeES synthetic close
-    liquid = dfs['liquid']
-    daily_yield = 0.055 / 252
-    liquid_synthetic_close = 1000 * (1 + daily_yield) ** np.arange(len(liquid))
-    liquid['Close'] = liquid_synthetic_close
-    dfs['liquid'] = liquid
+    nifty = df["NIFTYBEES.NS"]
+    gold = df["GOLDBEES.NS"]
     
-    close = pd.DataFrame({n: dfs[n]['Close'] for n in names})
-    high = pd.DataFrame({n: dfs[n]['High'] for n in names})
-    low = pd.DataFrame({n: dfs[n]['Low'] for n in names})
+    # Calculate Ratio and MAs
+    ratio = nifty / gold
+    sma50 = ratio.rolling(50).mean()
+    sma200 = ratio.rolling(200).mean()
     
-    ema20 = close.apply(lambda x: ta.ema(x, length=20))
-    sma50 = close.apply(lambda x: ta.sma(x, length=50))
-    rsi14 = close.apply(lambda x: ta.rsi(x, length=14))
-    roc126 = close.apply(lambda x: ta.roc(x, length=126))
-    
-    def get_macd_line(x):
-        res = ta.macd(x, fast=12, slow=26, signal=9)
-        return res.iloc[:, 0] if res is not None and not res.empty else pd.Series(index=x.index, dtype=float)
-        
-    def get_macd_signal(x):
-        res = ta.macd(x, fast=12, slow=26, signal=9)
-        return res.iloc[:, 2] if res is not None and not res.empty else pd.Series(index=x.index, dtype=float)
-
-    macd_line = close.apply(get_macd_line)
-    macd_signal = close.apply(get_macd_signal)
-    
-    latest_roc126 = roc126.iloc[-1]
-    max_roc_asset = latest_roc126.idxmax()
-    active_asset = {n: (n == max_roc_asset) for n in names}
-    
-    latest_close = close.iloc[-1]
-    latest_high = high.iloc[-1]
-    latest_low = low.iloc[-1]
-    latest_ema20 = ema20.iloc[-1]
+    # Get latest values
+    latest_ratio = ratio.iloc[-1]
     latest_sma50 = sma50.iloc[-1]
-    latest_rsi14 = rsi14.iloc[-1]
+    latest_sma200 = sma200.iloc[-1]
+    
+    # Logic: if SMA50 > SMA200, Nifty is active. Else Gold is active.
+    is_nifty_bull = latest_sma50 > latest_sma200
+    active_asset = "nifty" if is_nifty_bull else "gold"
     
     results = {
-        "date": trading_dates[-1].date().isoformat(),
-        "active_asset": max_roc_asset,
-        "roc": latest_roc126.to_dict(),
+        "date": df.index[-1].date().isoformat(),
+        "active_asset": active_asset,
+        "ratio_metrics": {
+            "current_ratio": float(latest_ratio),
+            "sma50": float(latest_sma50) if not np.isnan(latest_sma50) else None,
+            "sma200": float(latest_sma200) if not np.isnan(latest_sma200) else None
+        },
         "signals": {},
         "chart_data": {}
     }
     
-    for asset in ["nifty", "gold"]:
-        is_active = active_asset[asset]
-        is_pullback = (latest_low[asset] <= latest_ema20[asset]) and (latest_high[asset] >= latest_ema20[asset])
-        is_proximity = (latest_close[asset] <= latest_ema20[asset] * 1.015) and (latest_close[asset] >= latest_ema20[asset] * 0.985)
-        is_rsi_ok = (latest_rsi14[asset] > 40) and (latest_rsi14[asset] < 70)
-        
-        cross_below = (macd_line[asset].iloc[-1] < macd_signal[asset].iloc[-1]) and (macd_line[asset].iloc[-2] >= macd_signal[asset].iloc[-2])
-        close_below_sma = latest_close[asset] < latest_sma50[asset]
-        
-        action = "HOLD"
-        reason = "No entry/exit conditions met."
-        color = "blue"
-        
-        if not is_active:
-            action = "SELL"
-            reason = "Regime shift. Not the active asset."
-            color = "red"
-        elif cross_below or close_below_sma:
-            action = "SELL"
-            reason = f"Exit triggered: {'MACD Bearish Cross' if cross_below else 'Close below 50 SMA'}."
-            color = "red"
-        elif is_active and (is_pullback or is_proximity) and is_rsi_ok:
-            action = "BUY"
-            reason = "Active Asset + Pullback to EMA20 + RSI(14) between 40-70."
-            color = "green"
-        elif is_active:
-            action = "HOLD"
-            reason = "Active Asset. Waiting for pullback to 20 EMA."
-            color = "yellow"
-            
-        results["signals"][asset] = {
-            "action": action,
-            "reason": reason,
-            "color": color,
-            "metrics": {
-                "close": float(latest_close[asset]),
-                "ema20": float(latest_ema20[asset]),
-                "sma50": float(latest_sma50[asset]),
-                "rsi14": float(latest_rsi14[asset]),
-                "roc126": float(latest_roc126[asset])
-            }
-        }
-        
-        # Save last 60 days for charting
-        chart_df = dfs[asset].tail(60).copy()
-        chart_df['EMA20'] = ema20[asset].tail(60)
-        chart_df['SMA50'] = sma50[asset].tail(60)
-        
-        # Convert to records for JSON serialization (Streamlit session state compatibility)
-        chart_df.index = chart_df.index.strftime('%Y-%m-%d')
-        chart_df_reset = chart_df.reset_index().rename(columns={'index': 'Date'})
-        results["chart_data"][asset] = chart_df_reset.to_dict(orient="records")
-        
-    # Liquid
-    results["signals"]["liquid"] = {
-        "action": "BUY" if active_asset["liquid"] else "HOLD",
-        "reason": "Market in cash regime." if active_asset["liquid"] else "Not in cash regime.",
-        "color": "blue" if active_asset["liquid"] else "gray",
-        "metrics": {
-            "close": float(latest_close["liquid"]),
-            "roc126": float(latest_roc126["liquid"])
-        }
+    # Signals
+    results["signals"]["nifty"] = {
+        "action": "BUY" if is_nifty_bull else "SELL",
+        "reason": "Ratio 50 SMA > 200 SMA (Nifty Outperforming)" if is_nifty_bull else "Ratio 50 SMA < 200 SMA (Gold Outperforming)",
+        "color": "green" if is_nifty_bull else "red"
     }
+    
+    results["signals"]["gold"] = {
+        "action": "SELL" if is_nifty_bull else "BUY",
+        "reason": "Ratio 50 SMA > 200 SMA (Nifty Outperforming)" if is_nifty_bull else "Ratio 50 SMA < 200 SMA (Gold Outperforming)",
+        "color": "red" if is_nifty_bull else "green"
+    }
+    
+    # Provide chart data for the Ratio (last 250 days)
+    chart_df = pd.DataFrame({
+        "Ratio": ratio.tail(250),
+        "SMA50": sma50.tail(250),
+        "SMA200": sma200.tail(250)
+    })
+    
+    chart_df.index = chart_df.index.strftime('%Y-%m-%d')
+    chart_df_reset = chart_df.reset_index().rename(columns={'Date': 'Date'})
+    # Fix the index column name from 'index' to 'Date'
+    chart_df_reset.rename(columns={'index': 'Date'}, inplace=True)
+    
+    # Fill NaNs with None for JSON serialization
+    chart_df_reset = chart_df_reset.replace({np.nan: None})
+    
+    results["chart_data"]["ratio"] = chart_df_reset.to_dict(orient="records")
     
     return results
 

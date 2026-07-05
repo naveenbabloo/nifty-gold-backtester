@@ -3,7 +3,7 @@ sys.path.append('.')
 import vectorbt as vbt
 import pandas as pd
 import numpy as np
-from strategies.dual_momentum_swing import load_data, generate_signals
+from strategies.ratio_strategy import load_data, generate_signals
 from src.portfolio_config import create_portfolio
 from src.tax_tracker import apply_taxes
 
